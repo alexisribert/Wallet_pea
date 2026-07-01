@@ -8,9 +8,16 @@ import requests
 # Configuration de la page
 st.set_page_config(page_title="Gestionnaire de Portefeuille PEA", layout="wide")
 
-# Initialisation du portfolio dynamique (on stocke toutes les infos nécessaires)
+# Initialisation des variables de session
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = pd.DataFrame(columns=["ISIN", "Ticker", "Nom", "Quantité", "PRU", "Geo"])
+
+if "sim_ticker" not in st.session_state: st.session_state.sim_ticker = ""
+if "sim_nom" not in st.session_state: st.session_state.sim_nom = ""
+if "sim_geo" not in st.session_state: st.session_state.sim_geo = "Inconnu (à définir)"
+
+# Liste des zones gérées
+GEO_ZONES = ["États-Unis", "Zone Euro / Europe", "Émergents", "Asie-Pacifique", "Japon", "Monde", "Inconnu (à définir)"]
 
 # --- FONCTIONS UTILES ---
 @st.cache_data(ttl=3600)
@@ -31,11 +38,28 @@ def search_isin_yahoo(isin):
         data = response.json()
         quotes = data.get('quotes', [])
         if quotes:
-            # On récupère le premier résultat pertinent
             return quotes[0].get('symbol', ''), quotes[0].get('shortname', 'Nom inconnu')
     except Exception:
         pass
     return "", ""
+
+def guess_geo_from_name(name):
+    """Déduit la zone géographique en fonction des mots-clés dans le nom de l'ETF."""
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in ["s&p", "sp500", "nasdaq", " us ", "usa", "msci usa", "russell"]):
+        return "États-Unis"
+    elif any(kw in name_lower for kw in ["emu", "euro", "europe", "stoxx", "cac", "dax"]):
+        return "Zone Euro / Europe"
+    elif any(kw in name_lower for kw in ["emerging", "emergent", "em "]):
+        return "Émergents"
+    elif any(kw in name_lower for kw in ["asia", "asie", "pacific", "pacifique"]):
+        return "Asie-Pacifique"
+    elif any(kw in name_lower for kw in ["japan", "japon", "topix", "nikkei"]):
+        return "Japon"
+    elif any(kw in name_lower for kw in ["world", "monde", "acwi"]):
+        return "Monde"
+    else:
+        return "Inconnu (à définir)"
 
 # --- BARRE LATÉRALE : IMPORT / EXPORT & AJOUT ---
 st.sidebar.header("📥 Importer / Sauvegarder")
@@ -54,37 +78,41 @@ if uploaded_file is not None:
 
 if not st.session_state.portfolio.empty:
     csv_data = st.session_state.portfolio.to_csv(index=False).encode('utf-8')
-    st.sidebar.download_button("💾 Télécharger le portefeuille (CSV)", data=csv_data, file_name='mon_portefeuille_pea.csv', mime='text/csv')
+    st.sidebar.download_button("💾 Télécharger (CSV)", data=csv_data, file_name='mon_portefeuille_pea.csv', mime='text/csv')
 
 st.sidebar.divider()
 
 # --- MOTEUR D'AJOUT UNIVERSEL ---
 st.sidebar.header("➕ Ajouter une position")
-st.sidebar.write("Entrez un ISIN pour rechercher ses informations sur les marchés :")
+st.sidebar.write("Entrez un ISIN pour auto-compléter ses données :")
 
 input_isin = st.sidebar.text_input("Code ISIN (ex: FR0013412020)").strip().upper()
 
-# Gestion de l'état temporaire pour la recherche
-if "temp_ticker" not in st.session_state: st.session_state.temp_ticker = ""
-if "temp_nom" not in st.session_state: st.session_state.temp_nom = ""
+# Variables temporaires pour le formulaire d'ajout
+if "add_ticker" not in st.session_state: st.session_state.add_ticker = ""
+if "add_nom" not in st.session_state: st.session_state.add_nom = ""
+if "add_geo" not in st.session_state: st.session_state.add_geo = "Inconnu (à définir)"
 
 if st.sidebar.button("🔍 Chercher l'ISIN"):
     if input_isin:
         ticker, nom = search_isin_yahoo(input_isin)
         if ticker:
-            st.session_state.temp_ticker = ticker
-            st.session_state.temp_nom = nom
+            st.session_state.add_ticker = ticker
+            st.session_state.add_nom = nom
+            st.session_state.add_geo = guess_geo_from_name(nom)
             st.sidebar.success(f"Trouvé : {nom} ({ticker})")
         else:
-            st.sidebar.warning("Introuvable automatiquement. Veuillez remplir manuellement le Ticker Yahoo.")
-            st.session_state.temp_ticker = ""
-            st.session_state.temp_nom = ""
+            st.sidebar.warning("Introuvable automatiquement. Remplissez manuellement.")
+            st.session_state.add_ticker = ""
+            st.session_state.add_nom = ""
+            st.session_state.add_geo = "Inconnu (à définir)"
 
-# Formulaire d'ajout des paramètres
 with st.sidebar.form("add_form"):
-    final_ticker = st.text_input("Ticker (Yahoo Finance)", value=st.session_state.temp_ticker)
-    final_nom = st.text_input("Nom de l'actif", value=st.session_state.temp_nom)
-    final_geo = st.selectbox("Zone géographique", ["États-Unis", "Zone Euro", "Europe Globale", "Émergents", "Asie-Pacifique", "Japon", "Monde", "Inconnu"])
+    final_ticker = st.text_input("Ticker (Yahoo Finance)", value=st.session_state.add_ticker)
+    final_nom = st.text_input("Nom de l'actif", value=st.session_state.add_nom)
+    
+    default_geo_index = GEO_ZONES.index(st.session_state.add_geo) if st.session_state.add_geo in GEO_ZONES else 6
+    final_geo = st.selectbox("Zone géographique", GEO_ZONES, index=default_geo_index)
     
     qty_input = st.number_input("Nombre de parts", min_value=1, step=1)
     pru_input = st.number_input("Prix de Revient Unitaire (PRU) €", min_value=0.0, step=0.1, format="%.2f")
@@ -101,7 +129,6 @@ with st.sidebar.form("add_form"):
             "Geo": final_geo
         }
         
-        # Mise à jour si l'ISIN est déjà présent, sinon ajout d'une nouvelle ligne
         if input_isin in st.session_state.portfolio["ISIN"].values:
             idx = st.session_state.portfolio[st.session_state.portfolio["ISIN"] == input_isin].index
             for col in new_data.keys():
@@ -110,8 +137,6 @@ with st.sidebar.form("add_form"):
             st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_data])], ignore_index=True)
             
         st.success("Position enregistrée !")
-        st.session_state.temp_ticker = ""
-        st.session_state.temp_nom = ""
 
 if st.sidebar.button("🗑️ Vider le portefeuille"):
     st.session_state.portfolio = pd.DataFrame(columns=["ISIN", "Ticker", "Nom", "Quantité", "PRU", "Geo"])
@@ -123,7 +148,6 @@ st.title("📊 Tableau de Bord PEA")
 if not st.session_state.portfolio.empty:
     df = st.session_state.portfolio.copy()
     
-    # Conversions pour éviter les bugs de types avec pandas
     df["Quantité"] = pd.to_numeric(df["Quantité"])
     df["PRU"] = pd.to_numeric(df["PRU"])
     df["Prix Actuel (€)"] = df["Ticker"].apply(get_current_price)
@@ -154,7 +178,6 @@ if not st.session_state.portfolio.empty:
     col2.metric("Total Investi", f"{inv_total:.2f} €")
     col3.metric("Plus-Value Globale", f"{pv_globale:+.2f} €", f"{pv_pct:.2f}%")
 
-    # Répartition Géographique Dynamique
     st.divider()
     st.subheader("🌍 Répartition Géographique")
     
@@ -167,46 +190,93 @@ if not st.session_state.portfolio.empty:
 else:
     st.info("👈 Ajoutez des positions ou importez un portefeuille CSV via la barre latérale pour commencer.")
 
-# --- SIMULATEUR D'ORDRE DYNAMIQUE ---
+# --- SIMULATEUR D'ORDRE UNIVERSEL ---
 st.divider()
-st.subheader("🛒 Projet d'Ordre (Tarif PEA Découverte Boursobank)")
+st.subheader("🛒 Projet d'Ordre & Impact Géographique")
+st.write("Saisissez n'importe quel ISIN pour simuler un ordre et visualiser son impact sur la répartition de votre portefeuille.")
 
-if not st.session_state.portfolio.empty:
-    list_isins = st.session_state.portfolio["ISIN"].tolist()
-    sim_isin = st.selectbox("Sélectionnez un ISIN présent dans votre portefeuille :", list_isins)
-
-    is_boursomarkets_str = st.radio("Ce produit est-il éligible Boursomarkets ?", ["Non (Tarif Découverte)", "Oui (0€ de courtage)"])
-    is_boursomarkets = (is_boursomarkets_str == "Oui (0€ de courtage)")
-
-    if sim_isin:
-        # On va chercher le ticker directement dans le dataframe du portefeuille
-        ticker = st.session_state.portfolio.loc[st.session_state.portfolio["ISIN"] == sim_isin, "Ticker"].values[0]
-        current_price = get_current_price(ticker)
-        
-        if current_price > 0:
-            min_amount = 200.0
-            qty_needed = math.ceil(min_amount / current_price)
-            order_cost = qty_needed * current_price
-            
-            if is_boursomarkets:
-                fees = 0.0
+col_s1, col_s2 = st.columns([2, 1])
+with col_s1:
+    sim_input_isin = st.text_input("Code ISIN à simuler (ex: FR0013412020) :").strip().upper()
+with col_s2:
+    st.write("")
+    st.write("")
+    if st.button("Chercher l'actif"):
+        if sim_input_isin:
+            ticker_sim, nom_sim = search_isin_yahoo(sim_input_isin)
+            if ticker_sim:
+                st.session_state.sim_ticker = ticker_sim
+                st.session_state.sim_nom = nom_sim
+                st.session_state.sim_geo = guess_geo_from_name(nom_sim)
             else:
-                base_fee = 1.99 if order_cost <= 500.0 else order_cost * 0.006
-                max_legal_pea_fee = order_cost * 0.005
-                fees = min(base_fee, max_legal_pea_fee)
-                
-            total_cost = order_cost + fees
-            
-            st.write(f"**Prix unitaire estimé :** {current_price:.2f} €")
-            
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Quantité minimale (>200€)", f"{qty_needed} parts")
-            col_b.metric("Valeur de l'ordre", f"{order_cost:.2f} €")
-            col_c.metric("Frais de courtage estimés*", f"{fees:.2f} €")
-            
-            st.info(f"👉 **Coût total de l'opération : {total_cost:.2f} €**")
-            st.caption("*Frais plafonnés légalement à 0,5% maximum pour le PEA.*")
+                st.error("ISIN introuvable sur Yahoo Finance.")
+                st.session_state.sim_ticker = ""
+
+# Si un actif a été trouvé et stocké dans la session, on affiche la suite
+if st.session_state.sim_ticker:
+    st.success(f"Actif trouvé : **{st.session_state.sim_nom}** (Ticker: {st.session_state.sim_ticker})")
+    
+    current_price = get_current_price(st.session_state.sim_ticker)
+    
+    if current_price > 0:
+        # Options de simulation
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            is_boursomarkets_str = st.radio("Frais de courtage :", ["Tarif Découverte Classique", "Éligible Boursomarkets (0€)"], horizontal=True)
+            is_boursomarkets = (is_boursomarkets_str == "Éligible Boursomarkets (0€)")
+        with col_opt2:
+            default_sim_geo_idx = GEO_ZONES.index(st.session_state.sim_geo) if st.session_state.sim_geo in GEO_ZONES else 6
+            sim_geo_selected = st.selectbox("Zone géo. de l'actif (modifiable) :", GEO_ZONES, index=default_sim_geo_idx)
+
+        # Calculs de l'ordre
+        min_amount = 200.0
+        qty_needed = math.ceil(min_amount / current_price)
+        order_cost = qty_needed * current_price
+        
+        if is_boursomarkets:
+            fees = 0.0
         else:
-            st.error("Impossible de récupérer le prix actuel. Vérifiez que le Ticker est correct.")
-else:
-    st.write("Ajoutez d'abord une ligne dans votre portefeuille pour simuler un ordre.")
+            base_fee = 1.99 if order_cost <= 500.0 else order_cost * 0.006
+            max_legal_pea_fee = order_cost * 0.005
+            fees = min(base_fee, max_legal_pea_fee)
+            
+        total_cost = order_cost + fees
+        
+        st.write(f"**Prix unitaire actuel :** {current_price:.2f} €")
+        
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Quantité minimale (>200€)", f"{qty_needed} parts")
+        col_b.metric("Valeur de l'ordre", f"{order_cost:.2f} €")
+        col_c.metric("Frais de courtage estimés*", f"{fees:.2f} €")
+        
+        st.info(f"👉 **Coût total de l'opération : {total_cost:.2f} €**")
+        
+        # --- PONDÉRATION GÉOGRAPHIQUE SIMULÉE ---
+        st.markdown("### ⚖️ Comparatif de pondération (Avant / Après)")
+        
+        if not st.session_state.portfolio.empty:
+            # Récupération des valorisations actuelles
+            curr_df = st.session_state.portfolio.copy()
+            curr_df["Valeur Totale (€)"] = pd.to_numeric(curr_df["Quantité"]) * curr_df["Ticker"].apply(get_current_price)
+            current_geo = curr_df.groupby("Geo")["Valeur Totale (€)"].sum().reset_index()
+            
+            # Création du dataframe simulé avec le nouvel ordre
+            new_row = pd.DataFrame([{"Geo": sim_geo_selected, "Valeur Totale (€)": order_cost}])
+            sim_df = pd.concat([curr_df, new_row], ignore_index=True)
+            simulated_geo = sim_df.groupby("Geo")["Valeur Totale (€)"].sum().reset_index()
+
+            # Affichage des deux graphiques côte à côte
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1:
+                fig1 = px.pie(current_geo, values="Valeur Totale (€)", names="Geo", hole=0.4, title="Répartition Actuelle")
+                fig1.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig1, use_container_width=True)
+                
+            with col_chart2:
+                fig2 = px.pie(simulated_geo, values="Valeur Totale (€)", names="Geo", hole=0.4, title="Répartition Simulée (Post-Achat)")
+                fig2.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.warning("Votre portefeuille est actuellement vide. Ajoutez d'abord vos positions existantes pour comparer la répartition avant et après cet ordre.")
+    else:
+        st.error("Prix indisponible actuellement.")
